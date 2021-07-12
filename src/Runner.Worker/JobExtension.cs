@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.Serialization;
+using System.Threading;
 using System.Threading.Tasks;
 using GitHub.DistributedTask.Expressions2;
 using GitHub.DistributedTask.ObjectTemplating.Tokens;
@@ -41,6 +42,8 @@ namespace GitHub.Runner.Worker
         private readonly HashSet<string> _existingProcesses = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private bool _processCleanup;
         private string _processLookupId = $"github_{Guid.NewGuid()}";
+        private CancellationTokenSource _diskSpaceCheckToken = new CancellationTokenSource();
+        private Task _diskSpaceCheckTask = null;
 
         // Download all required actions.
         // Make sure all condition inputs are valid.
@@ -74,6 +77,10 @@ namespace GitHub.Runner.Worker
                         {
                             // print out HostName for self-hosted runner
                             context.Output($"Runner name: '{setting.AgentName}'");
+                            if (message.Variables.TryGetValue("system.runnerGroupName", out VariableValue runnerGroupName))
+                            {
+                                context.Output($"Runner group name: '{runnerGroupName.Value}'");
+                            }
                             context.Output($"Machine name: '{Environment.MachineName}'");
                         }
                     }
@@ -113,6 +120,26 @@ namespace GitHub.Runner.Worker
                             context.Output($"Fail to load and print machine setup info: {ex.Message}");
                             Trace.Error(ex);
                         }
+                    }
+
+                    try 
+                    {
+                        var tokenPermissions = jobContext.Global.Variables.Get("system.github.token.permissions") ?? "";
+                        if (!string.IsNullOrEmpty(tokenPermissions))
+                        {
+                            context.Output($"##[group]GITHUB_TOKEN Permissions");
+                            var permissions = StringUtil.ConvertFromJson<Dictionary<string, string>>(tokenPermissions);
+                            foreach(KeyValuePair<string, string> entry in permissions)
+                            {
+                                context.Output($"{entry.Key}: {entry.Value}");
+                            }
+                            context.Output("##[endgroup]");
+                        }
+                    } 
+                    catch (Exception ex)
+                    {
+                        context.Output($"Fail to parse and display GITHUB_TOKEN permissions list: {ex.Message}");
+                        Trace.Error(ex);
                     }
 
                     var repoFullName = context.GetGitHubContext("repository");
@@ -321,6 +348,12 @@ namespace GitHub.Runner.Worker
                         }
                     }
 
+                    jobContext.Global.EnvironmentVariables.TryGetValue(Constants.Runner.Features.DiskSpaceWarning, out var enableWarning);
+                    if (StringUtil.ConvertToBoolean(enableWarning, defaultValue: true))
+                    {
+                        _diskSpaceCheckTask = CheckDiskSpaceAsync(context, _diskSpaceCheckToken.Token);
+                    }
+
                     return steps;
                 }
                 catch (OperationCanceledException ex) when (jobContext.CancellationToken.IsCancellationRequested)
@@ -329,6 +362,14 @@ namespace GitHub.Runner.Worker
                     Trace.Error($"Caught cancellation exception from JobExtension Initialization: {ex}");
                     context.Error(ex);
                     context.Result = TaskResult.Canceled;
+                    throw;
+                }
+                catch (FailedToResolveActionDownloadInfoException ex)
+                {
+                    // Log the error and fail the JobExtension Initialization.
+                    Trace.Error($"Caught exception from JobExtenion Initialization: {ex}");
+                    context.InfrastructureError(ex.Message);
+                    context.Result = TaskResult.Failed;
                     throw;
                 }
                 catch (Exception ex)
@@ -361,6 +402,24 @@ namespace GitHub.Runner.Worker
                     context.Start();
                     context.Debug("Starting: Complete job");
 
+                    Trace.Info("Initialize Env context");
+
+#if OS_WINDOWS
+                    var envContext = new DictionaryContextData();
+#else
+                    var envContext = new CaseSensitiveDictionaryContextData();
+#endif
+                    context.ExpressionValues["env"] = envContext;
+                    foreach (var pair in context.Global.EnvironmentVariables)
+                    {
+                        envContext[pair.Key] = new StringContextData(pair.Value ?? string.Empty);
+                    }
+
+                    // Populate env context for each step
+                    Trace.Info("Initialize steps context");
+                    context.ExpressionValues["steps"] = context.Global.StepsContext.GetScope(context.ScopeName);
+
+                    var templateEvaluator = context.ToPipelineTemplateEvaluator();
                     // Evaluate job outputs
                     if (message.JobOutputs != null && message.JobOutputs.Type != TokenType.Null)
                     {
@@ -370,21 +429,7 @@ namespace GitHub.Runner.Worker
 
                             // Populate env context for each step
                             Trace.Info("Initialize Env context for evaluating job outputs");
-#if OS_WINDOWS
-                            var envContext = new DictionaryContextData();
-#else
-                            var envContext = new CaseSensitiveDictionaryContextData();
-#endif
-                            context.ExpressionValues["env"] = envContext;
-                            foreach (var pair in context.Global.EnvironmentVariables)
-                            {
-                                envContext[pair.Key] = new StringContextData(pair.Value ?? string.Empty);
-                            }
 
-                            Trace.Info("Initialize steps context for evaluating job outputs");
-                            context.ExpressionValues["steps"] = context.Global.StepsContext.GetScope(context.ScopeName);
-
-                            var templateEvaluator = context.ToPipelineTemplateEvaluator();
                             var outputs = templateEvaluator.EvaluateJobOutput(message.JobOutputs, context.ExpressionValues, context.ExpressionFunctions);
                             foreach (var output in outputs)
                             {
@@ -408,6 +453,34 @@ namespace GitHub.Runner.Worker
                         {
                             context.Result = TaskResult.Failed;
                             context.Error($"Fail to evaluate job outputs");
+                            context.Error(ex);
+                            jobContext.Result = TaskResultUtil.MergeTaskResults(jobContext.Result, TaskResult.Failed);
+                        }
+                    }
+
+                    // Evaluate environment data
+                    if (jobContext.ActionsEnvironment?.Url != null && jobContext.ActionsEnvironment?.Url.Type != TokenType.Null)
+                    {
+                        try
+                        {
+                            context.Output($"Evaluate and set environment url");
+
+                            var environmentUrlToken = templateEvaluator.EvaluateEnvironmentUrl(jobContext.ActionsEnvironment.Url, context.ExpressionValues, context.ExpressionFunctions);
+                            var environmentUrl = environmentUrlToken.AssertString("environment.url");
+                            if (!string.Equals(environmentUrl.Value, HostContext.SecretMasker.MaskSecrets(environmentUrl.Value)))
+                            {
+                                context.Warning($"Skip setting environment url as environment '{jobContext.ActionsEnvironment.Name}' may contain secret.");
+                            }
+                            else
+                            {
+                                context.Output($"Evaluated environment url: {environmentUrl}");
+                                jobContext.ActionsEnvironment.Url = environmentUrlToken;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            context.Result = TaskResult.Failed;
+                            context.Error($"Failed to evaluate environment url");
                             context.Error(ex);
                             jobContext.Result = TaskResultUtil.MergeTaskResults(jobContext.Result, TaskResult.Failed);
                         }
@@ -485,6 +558,11 @@ namespace GitHub.Runner.Worker
                             }
                         }
                     }
+
+                    if (_diskSpaceCheckTask != null)
+                    {
+                        _diskSpaceCheckToken.Cancel();
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -496,6 +574,39 @@ namespace GitHub.Runner.Worker
                 {
                     context.Debug("Finishing: Complete job");
                     context.Complete();
+                }
+            }
+        }
+
+        private async Task CheckDiskSpaceAsync(IExecutionContext context, CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                // Add warning when disk is lower than system.runner.lowdiskspacethreshold from service (default to 100 MB on service side)
+                var lowDiskSpaceThreshold = context.Global.Variables.GetInt(WellKnownDistributedTaskVariables.RunnerLowDiskspaceThreshold);
+                if (lowDiskSpaceThreshold == null)
+                {
+                    Trace.Info($"Low diskspace warning is not enabled.");
+                    return;
+                }
+                var workDirRoot = Directory.GetDirectoryRoot(HostContext.GetDirectory(WellKnownDirectory.Work));
+                var driveInfo = new DriveInfo(workDirRoot);
+                var freeSpaceInMB = driveInfo.AvailableFreeSpace / 1024 / 1024;
+                if (freeSpaceInMB < lowDiskSpaceThreshold)
+                {
+                    var issue = new Issue() { Type = IssueType.Warning, Message = $"You are running out of disk space. The runner will stop working when the machine runs out of disk space. Free space left: {freeSpaceInMB} MB" };
+                    issue.Data[Constants.Runner.InternalTelemetryIssueDataKey] = Constants.Runner.LowDiskSpace;
+                    context.AddIssue(issue);
+                    return;
+                }
+
+                try
+                {
+                    await Task.Delay(10 * 1000, token);
+                }
+                catch (TaskCanceledException)
+                {
+                    // ignore
                 }
             }
         }

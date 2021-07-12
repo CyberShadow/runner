@@ -1,15 +1,17 @@
 ## Features
-  - Composite Actions Support for Multiple Run Steps (#549, #557, #564, #568, #569, #578, #591, #599, #605, #609, #610, #615, #624) 
-  - Prepare to switch GITHUB_ACTION to use ContextName instead of refname (#593)
-  - Fold logs for intermediate docker commands (#608)
-  - Add ability to register a runner to the non-default self-hosted runner group (#613)
-  
+
+- Use GITHUB_TOKEN for ghcr.io containers if credentials are not provided (#990)
+
 ## Bugs
-  - Double quotes around variable so CD works if path contains spaces (#602)
-  - Bump lodash in /src/Misc/expressionFunc/hashFiles (#603) 
-  - Fix poor performance of process spawned from svc daemon (#614)
+
+- Do not trucate error message from template evaluation (#1038)
+- Make FileShare ReadWrite (#1033)
+- Mask secrets with double-quotes when passed to docker command line (#1002)
+- Delete script files before replacing during update (#984)
+
+
 ## Misc
-  - Move shared ExecutionContext properties under .Global (#594)
+
 
 ## Windows x64
 We recommend configuring the runner in a root folder of the Windows drive (e.g. "C:\actions-runner"). This will help avoid issues related to service identity folder permissions and long file path restrictions on Windows.
@@ -47,7 +49,7 @@ curl -O -L https://github.com/actions/runner/releases/download/v<RUNNER_VERSION>
 tar xzf ./actions-runner-linux-x64-<RUNNER_VERSION>.tar.gz
 ```
 
-## Linux arm64 (Pre-release)
+## Linux arm64
 
 ``` bash
 # Create a folder
@@ -58,7 +60,7 @@ curl -O -L https://github.com/actions/runner/releases/download/v<RUNNER_VERSION>
 tar xzf ./actions-runner-linux-arm64-<RUNNER_VERSION>.tar.gz
 ```
 
-## Linux arm (Pre-release)
+## Linux arm
 
 ``` bash
 # Create a folder
@@ -71,3 +73,13 @@ tar xzf ./actions-runner-linux-arm-<RUNNER_VERSION>.tar.gz
 
 ## Using your self hosted runner
 For additional details about configuring, running, or shutting down the runner please check out our [product docs.](https://help.github.com/en/actions/automating-your-workflow-with-github-actions/adding-self-hosted-runners)
+
+## SHA-256 Checksums
+
+The SHA-256 checksums for the packages included in this build are shown below:
+
+- actions-runner-win-x64-<RUNNER_VERSION>.zip <!-- BEGIN SHA win-x64 --><WIN_X64_SHA><!-- END SHA win-x64 -->
+- actions-runner-osx-x64-<RUNNER_VERSION>.tar.gz <!-- BEGIN SHA osx-x64 --><OSX_X64_SHA><!-- END SHA osx-x64 -->
+- actions-runner-linux-x64-<RUNNER_VERSION>.tar.gz <!-- BEGIN SHA linux-x64 --><LINUX_X64_SHA><!-- END SHA linux-x64 -->
+- actions-runner-linux-arm64-<RUNNER_VERSION>.tar.gz <!-- BEGIN SHA linux-arm64 --><LINUX_ARM64_SHA><!-- END SHA linux-arm64 -->
+- actions-runner-linux-arm-<RUNNER_VERSION>.tar.gz <!-- BEGIN SHA linux-arm --><LINUX_ARM_SHA><!-- END SHA linux-arm -->
