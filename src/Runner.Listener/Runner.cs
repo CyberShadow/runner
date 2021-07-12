@@ -470,7 +470,7 @@ Config Options:
  --labels string        Extra labels in addition to the default: 'self-hosted,{Constants.Runner.Platform},{Constants.Runner.PlatformArchitecture}'
  --work string          Relative runner work directory (default {Constants.Path.WorkDirectory})
  --replace              Replace any existing runner with the same name (default false)
- --ephemeral            Configure the runner only take one job and let service un-configured the runner after the job finish (default false)");
+ --ephemeral            Configure the runner to only take one job and then let the service un-configure the runner after the job finishes (default false)");
 #if OS_WINDOWS
     _term.WriteLine($@" --runasservice   Run the runner as a service");
     _term.WriteLine($@" --windowslogonaccount string   Account to run the service as. Requires runasservice");
